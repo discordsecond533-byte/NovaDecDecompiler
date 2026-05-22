@@ -472,6 +472,7 @@ local SvcMap = {
     playergui="__PG__",
     playerscripts="__PS__",
     backpack="__BP__",
+    character="__CHAR__",
 }
 
 local function getSvc(n)
@@ -494,20 +495,50 @@ local function getSvc(n)
     end
     if m == "__PG__" then
         local lp = Players.LocalPlayer
-        return lp and lp:FindFirstChild("PlayerGui")
+        if not lp then return nil end
+        return lp:FindFirstChild("PlayerGui") or lp:WaitForChild("PlayerGui", 3)
     end
     if m == "__PS__" then
         local lp = Players.LocalPlayer
-        return lp and lp:FindFirstChild("PlayerScripts")
+        if not lp then return nil end
+        return lp:FindFirstChild("PlayerScripts") or lp:WaitForChild("PlayerScripts", 3)
     end
     if m == "__BP__" then
         local lp = Players.LocalPlayer
-        return lp and lp:FindFirstChild("Backpack")
+        if not lp then return nil end
+        return lp:FindFirstChild("Backpack") or lp:WaitForChild("Backpack", 3)
+    end
+    if m == "__CHAR__" then
+        local lp = Players.LocalPlayer
+        if not lp then return nil end
+        local char = lp.Character
+        if not char then
+            char = lp:FindFirstChild("Character") or lp:WaitForChild("Character", 3)
+        end
+        return char
     end
 
     ok, s = pcall(function() return game:GetService(m) end)
     if ok and s then return s end
     return nil
+end
+
+local function findSingleDescendantScript(root)
+    if not root or type(root) ~= "userdata" or not root.GetDescendants then return nil end
+    local found = nil
+    pcall(function()
+        for _, child in ipairs(root:GetDescendants()) do
+            if child:IsA("LocalScript") or child:IsA("ModuleScript") or child:IsA("Script") then
+                if not found then
+                    found = child
+                else
+                    found = nil
+                    return
+                end
+            end
+        end
+    end)
+    return found
 end
 
 local function resolvePath(path)
@@ -518,8 +549,16 @@ local function resolvePath(path)
     -- Remove game. or game: prefix
     p = p:gsub("^game%.", ""):gsub("^game:", "")
     -- Handle game:GetService("X") or game:GetService("X"). syntax
-    p = p:gsub('^GetService%("([^"]+)"%)', '%1'):gsub("^GetService%('([^']+)'%)", '%1')
-    p = p:gsub('^GetService%("([^"]+)"%)', '%1')
+    p = p:gsub("^GetService%(%s*\"([^\"]+)\"%s*%)", "%1")
+    p = p:gsub("^GetService%(%s*'([^']+)'%s*%)", "%1")
+    -- Convert bracket notation into dot notation for quoted child names
+    p = p:gsub('%[%s*"(.-)"%s*%]', '.%1')
+    p = p:gsub("%[%s*'(.-)'%s*%]", '.%1')
+    p = p:gsub('%[%s*(%d+)%s*%]', '.%1')
+    -- Normalize alternative path separators
+    p = p:gsub("%s*%-%>%s*", ".")
+    p = p:gsub("[/\\]", ".")
+    p = p:gsub("%s*%.%s*", ".")
     -- Trim
     p = p:match("^%s*(.-)%s*$")
     if p == "" then return nil end
@@ -540,17 +579,22 @@ local function resolvePath(path)
         if segLower == "localplayer" then
             cur = Players.LocalPlayer
             if not cur then return nil end
-        elseif segLower == "playergui" and cur == Players.LocalPlayer then
-            cur = Players.LocalPlayer:FindFirstChild("PlayerGui")
+        elseif segLower == "playergui" and (type(cur) == "userdata" and cur:IsA("Player")) then
+            cur = cur:FindFirstChild("PlayerGui") or cur:WaitForChild("PlayerGui", 3)
             if not cur then return nil end
-        elseif segLower == "playerscripts" and cur == Players.LocalPlayer then
-            cur = Players.LocalPlayer:FindFirstChild("PlayerScripts")
+        elseif segLower == "playerscripts" and (type(cur) == "userdata" and cur:IsA("Player")) then
+            cur = cur:FindFirstChild("PlayerScripts") or cur:WaitForChild("PlayerScripts", 3)
             if not cur then return nil end
-        elseif segLower == "backpack" and cur == Players.LocalPlayer then
-            cur = Players.LocalPlayer:FindFirstChild("Backpack")
+        elseif segLower == "backpack" and (type(cur) == "userdata" and cur:IsA("Player")) then
+            cur = cur:FindFirstChild("Backpack") or cur:WaitForChild("Backpack", 3)
             if not cur then return nil end
-        elseif segLower == "character" and cur == Players.LocalPlayer then
-            cur = Players.LocalPlayer.Character
+        elseif segLower == "character" and (type(cur) == "userdata" and cur:IsA("Player")) then
+            local lp = cur
+            local char = lp.Character
+            if not char then
+                char = lp:FindFirstChild("Character") or lp:WaitForChild("Character", 3)
+            end
+            cur = char
             if not cur then return nil end
         elseif segLower == "starterplayerscripts" then
             local sp = game:GetService("StarterPlayer")
@@ -581,6 +625,14 @@ local function resolvePath(path)
             cur = ch
         end
     end
+
+    if cur and type(cur) == "userdata" and cur.GetDescendants and not (cur:IsA("LocalScript") or cur:IsA("ModuleScript") or cur:IsA("Script")) then
+        local autoScript = findSingleDescendantScript(cur)
+        if autoScript then
+            cur = autoScript
+        end
+    end
+
     return cur
 end
 
@@ -606,6 +658,13 @@ local function searchScripts(name)
             for _, n in ipairs({"PlayerGui","PlayerScripts","Backpack"}) do
                 local c = lp:FindFirstChild(n)
                 if c then scan(c) end
+            end
+            local char = lp.Character
+            if not char then
+                char = lp:FindFirstChild("Character") or lp:WaitForChild("Character", 3)
+            end
+            if char then
+                scan(char)
             end
         end
     end)
@@ -648,10 +707,13 @@ for _, b in ipairs({closeBtn, minBtn}) do
     b.MouseLeave:Connect(function() tw(b, {BackgroundColor3 = C.srf}, 0.12) end)
 end
 
+-- Tabs system
+local TAB = { DECOMPILER = 1, AI = 2 }
+local activeTab = TAB.DECOMPILER
+local aiApiKey = ""
+
 -- Content
 local content = Instance.new("Frame"); content.Size = UDim2.new(1, -16, 1, -55); content.Position = UDim2.new(0, 8, 0, 50); content.BackgroundTransparency = 1; content.ClipsDescendants = true; content.Parent = main
-
--- Input
 local iCont = Instance.new("Frame"); iCont.Size = UDim2.new(1, 0, 0, 34); iCont.BackgroundColor3 = C.bg3; iCont.BorderSizePixel = 0; iCont.Parent = content; corner(iCont, 8); local iStk = stk(iCont)
 local inputBox = Instance.new("TextBox"); inputBox.Size = UDim2.new(1, -12, 1, 0); inputBox.Position = UDim2.new(0, 6, 0, 0); inputBox.BackgroundTransparency = 1; inputBox.Text = ""; inputBox.PlaceholderText = "Script path or name..."; inputBox.PlaceholderColor3 = C.t3; inputBox.TextColor3 = C.t1; inputBox.TextSize = 12; inputBox.Font = Enum.Font.Code; inputBox.TextXAlignment = Enum.TextXAlignment.Left; inputBox.ClearTextOnFocus = false; inputBox.Parent = iCont
 inputBox.Focused:Connect(function() tw(iStk, {Color = C.acc}, 0.2) end)
@@ -668,11 +730,12 @@ local function mkBtn(text, x, w, accent)
     b.MouseLeave:Connect(function() tw(b, {BackgroundColor3 = accent and C.acc or C.srf}, 0.1) end)
     return b
 end
-local decompBtn = mkBtn("Decompile", 0, 105, true)
-local copyBtn = mkBtn("Copy", 110, 65)
-local selBtn = mkBtn("Select", 180, 60)
-local clearBtn = mkBtn("Clear", 245, 55)
-local saveBtn = mkBtn("Save", 305, 55)
+local decompBtn = mkBtn("Decompile", 0, 90, true)
+local askAiBtn = mkBtn("Ask AI", 95, 55, false)
+local copyBtn = mkBtn("Copy", 155, 65)
+local selBtn = mkBtn("Select", 225, 60)
+local clearBtn = mkBtn("Clear", 290, 55)
+local saveBtn = mkBtn("Save", 350, 55)
 
 -- Status
 local dStatus = Instance.new("TextLabel"); dStatus.Size = UDim2.new(1, 0, 0, 16); dStatus.Position = UDim2.new(0, 0, 0, 72); dStatus.BackgroundTransparency = 1; dStatus.Text = "Ready"; dStatus.TextColor3 = C.t3; dStatus.TextSize = 10; dStatus.Font = Enum.Font.Gotham; dStatus.TextXAlignment = Enum.TextXAlignment.Left; dStatus.TextTruncate = Enum.TextTruncate.AtEnd; dStatus.Parent = content
@@ -754,6 +817,120 @@ local function toast(msg, col, dur)
     task.delay(dur or 2, function() tw(t, {Position = UDim2.new(0.5, -110, 1, 6)}, 0.2); task.delay(0.25, function() t:Destroy() end) end)
 end
 
+-- ═══════════════════════════════════════════════════════════
+-- AI MODAL WINDOW
+-- ═══════════════════════════════════════════════════════════
+local aiApiKey = ""
+local aiWindow = Instance.new("Frame"); aiWindow.Name = "AIChat"; aiWindow.Size = UDim2.new(0, 550, 0.7, 0); aiWindow.Position = UDim2.new(0.5, -275, 0.15, 0)
+aiWindow.BackgroundColor3 = C.bg; aiWindow.BorderSizePixel = 0; aiWindow.ClipsDescendants = true; aiWindow.Visible = false; aiWindow.ZIndex = 50; aiWindow.Parent = sg
+corner(aiWindow, 12); stk(aiWindow)
+
+local aiHeader = Instance.new("Frame"); aiHeader.Size = UDim2.new(1, 0, 0, 44); aiHeader.BackgroundColor3 = C.bg2; aiHeader.BorderSizePixel = 0; aiHeader.Parent = aiWindow
+makeDrag(aiHeader, aiWindow)
+local aiTitle = Instance.new("TextLabel"); aiTitle.Size = UDim2.new(1, -70, 1, 0); aiTitle.Position = UDim2.new(0, 10, 0, 0); aiTitle.BackgroundTransparency = 1; aiTitle.Text = "Gemini AI Assistant"; aiTitle.TextColor3 = C.t1; aiTitle.TextSize = 13; aiTitle.Font = Enum.Font.GothamBold; aiTitle.TextXAlignment = Enum.TextXAlignment.Left; aiTitle.Parent = aiHeader
+local aiCloseBtn = Instance.new("TextButton"); aiCloseBtn.Size = UDim2.new(0, 28, 0, 28); aiCloseBtn.Position = UDim2.new(1, -36, 0.5, -14); aiCloseBtn.BackgroundColor3 = C.srf; aiCloseBtn.Text = "X"; aiCloseBtn.TextColor3 = C.t2; aiCloseBtn.TextSize = 12; aiCloseBtn.Font = Enum.Font.GothamBold; aiCloseBtn.AutoButtonColor = false; aiCloseBtn.Parent = aiHeader; corner(aiCloseBtn, 6)
+aiCloseBtn.MouseEnter:Connect(function() tw(aiCloseBtn, {BackgroundColor3 = C.red}, 0.12) end)
+aiCloseBtn.MouseLeave:Connect(function() tw(aiCloseBtn, {BackgroundColor3 = C.srf}, 0.12) end)
+aiCloseBtn.MouseButton1Click:Connect(function() tw(aiWindow, {BackgroundTransparency = 1}, 0.2); task.delay(0.25, function() aiWindow.Visible = false end) end)
+
+local apiKeyCont = Instance.new("Frame"); apiKeyCont.Size = UDim2.new(1, -16, 0, 30); apiKeyCont.Position = UDim2.new(0, 8, 0, 50); apiKeyCont.BackgroundColor3 = C.bg3; apiKeyCont.BorderSizePixel = 0; apiKeyCont.Parent = aiWindow; corner(apiKeyCont, 6); stk(apiKeyCont)
+local apiKeyBox = Instance.new("TextBox"); apiKeyBox.Size = UDim2.new(1, -12, 1, 0); apiKeyBox.Position = UDim2.new(0, 6, 0, 0); apiKeyBox.BackgroundTransparency = 1; apiKeyBox.Text = ""; apiKeyBox.PlaceholderText = "Google Gemini API Key"; apiKeyBox.PlaceholderColor3 = C.t3; apiKeyBox.TextColor3 = C.t1; apiKeyBox.TextSize = 10; apiKeyBox.Font = Enum.Font.Code; apiKeyBox.TextXAlignment = Enum.TextXAlignment.Left; apiKeyBox.ClearTextOnFocus = false; apiKeyBox.Parent = apiKeyCont
+apiKeyBox.FocusLost:Connect(function() aiApiKey = apiKeyBox.Text end)
+
+local chatScroll = Instance.new("ScrollingFrame"); chatScroll.Size = UDim2.new(1, -16, 1, -150); chatScroll.Position = UDim2.new(0, 8, 0, 85); chatScroll.BackgroundColor3 = C.bg2; chatScroll.BorderSizePixel = 0; chatScroll.ClipsDescendants = true; chatScroll.ScrollBarThickness = 5; chatScroll.ScrollBarImageColor3 = C.acc; chatScroll.CanvasSize = UDim2.new(0,0,0,0); chatScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y; chatScroll.ScrollingDirection = Enum.ScrollingDirection.Y; chatScroll.Parent = aiWindow; corner(chatScroll, 6); stk(chatScroll)
+Instance.new("UIListLayout", chatScroll).SortOrder = Enum.SortOrder.LayoutOrder
+local chatMessages = {}
+
+local function addMessage(text, isUser, isCode)
+    local msg = Instance.new("Frame"); msg.Size = UDim2.new(1, -8, 0, 0); msg.BackgroundColor3 = isUser and C.acc or C.bg3; msg.BorderSizePixel = 0; msg.LayoutOrder = #chatMessages + 1; msg.Parent = chatScroll; corner(msg, 6)
+    if isCode then
+        local hdr = Instance.new("Frame"); hdr.Size = UDim2.new(1, 0, 0, 22); hdr.BackgroundColor3 = C.bg; hdr.BorderSizePixel = 0; hdr.Parent = msg; corner(hdr, 4)
+        local lbl = Instance.new("TextLabel"); lbl.Size = UDim2.new(1, -28, 1, 0); lbl.Position = UDim2.new(0, 4, 0, 0); lbl.BackgroundTransparency = 1; lbl.Text = "Code"; lbl.TextColor3 = C.t2; lbl.TextSize = 9; lbl.Font = Enum.Font.GothamBold; lbl.TextXAlignment = Enum.TextXAlignment.Left; lbl.Parent = hdr
+        local cpyBtn = Instance.new("TextButton"); cpyBtn.Size = UDim2.new(0, 24, 0, 18); cpyBtn.Position = UDim2.new(1, -26, 0.5, -9); cpyBtn.BackgroundColor3 = C.srf; cpyBtn.BorderSizePixel = 0; cpyBtn.Text = "📋"; cpyBtn.TextSize = 10; cpyBtn.Font = Enum.Font.GothamBold; cpyBtn.AutoButtonColor = false; cpyBtn.Parent = hdr; corner(cpyBtn, 3); stk(cpyBtn)
+        cpyBtn.MouseButton1Click:Connect(function() if setclipboard then setclipboard(text); toast("Copied!", C.grn, 1.5) end end)
+        cpyBtn.MouseEnter:Connect(function() tw(cpyBtn, {BackgroundColor3 = C.srfH}, 0.08) end)
+        cpyBtn.MouseLeave:Connect(function() tw(cpyBtn, {BackgroundColor3 = C.srf}, 0.08) end)
+        local codeBox = Instance.new("TextLabel"); codeBox.Size = UDim2.new(1, -10, 0, 0); codeBox.Position = UDim2.new(0, 5, 0, 26); codeBox.BackgroundTransparency = 1; codeBox.Text = text; codeBox.TextColor3 = C.grn; codeBox.TextSize = 9; codeBox.Font = Enum.Font.Code; codeBox.TextXAlignment = Enum.TextXAlignment.Left; codeBox.TextYAlignment = Enum.TextYAlignment.Top; codeBox.TextWrapped = true; codeBox.AutomaticSize = Enum.AutomaticSize.Y; codeBox.Parent = msg
+        msg.Size = UDim2.new(1, -8, 0, 48 + codeBox.AbsoluteSize.Y)
+    else
+        local textLabel = Instance.new("TextLabel"); textLabel.Size = UDim2.new(1, -10, 0, 0); textLabel.Position = UDim2.new(0, 5, 0, 5); textLabel.BackgroundTransparency = 1; textLabel.Text = text; textLabel.TextColor3 = isUser and Color3.new(1,1,1) or C.t1; textLabel.TextSize = 10; textLabel.Font = Enum.Font.Gotham; textLabel.TextXAlignment = Enum.TextXAlignment.Left; textLabel.TextYAlignment = Enum.TextYAlignment.Top; textLabel.TextWrapped = true; textLabel.AutomaticSize = Enum.AutomaticSize.Y; textLabel.Parent = msg
+        msg.Size = UDim2.new(1, -8, 0, textLabel.AbsoluteSize.Y + 10)
+    end
+    chatMessages[#chatMessages+1] = msg
+    task.wait(0.02); chatScroll.CanvasPosition = Vector2.new(0, chatScroll.CanvasSize.Y)
+end
+
+local inputCont = Instance.new("Frame"); inputCont.Size = UDim2.new(1, -16, 0, 58); inputCont.Position = UDim2.new(0, 8, 1, -66); inputCont.BackgroundColor3 = C.bg3; inputCont.BorderSizePixel = 0; inputCont.Parent = aiWindow; corner(inputCont, 6); stk(inputCont)
+local questInput = Instance.new("TextBox"); questInput.Size = UDim2.new(1, -44, 0, 50); questInput.Position = UDim2.new(0, 4, 0, 4); questInput.BackgroundColor3 = C.bg2; questInput.BorderSizePixel = 0; questInput.Text = ""; questInput.PlaceholderText = "Ask about the code..."; questInput.PlaceholderColor3 = C.t3; questInput.TextColor3 = C.t1; questInput.TextSize = 9; questInput.Font = Enum.Font.Gotham; questInput.TextXAlignment = Enum.TextXAlignment.Left; questInput.TextYAlignment = Enum.TextYAlignment.Top; questInput.TextWrapped = true; questInput.MultiLine = true; questInput.ClearTextOnFocus = false; questInput.Parent = inputCont; corner(questInput, 4)
+local sendBtn = Instance.new("TextButton"); sendBtn.Size = UDim2.new(0, 36, 0, 50); sendBtn.Position = UDim2.new(1, -40, 0, 4); sendBtn.BackgroundColor3 = C.acc; sendBtn.BorderSizePixel = 0; sendBtn.Text = "→"; sendBtn.TextColor3 = Color3.new(1,1,1); sendBtn.TextSize = 16; sendBtn.Font = Enum.Font.GothamBold; sendBtn.AutoButtonColor = false; sendBtn.Parent = inputCont; corner(sendBtn, 4)
+sendBtn.MouseEnter:Connect(function() tw(sendBtn, {BackgroundColor3 = C.accH}, 0.08) end)
+sendBtn.MouseLeave:Connect(function() tw(sendBtn, {BackgroundColor3 = C.acc}, 0.08) end)
+
+local aiSending = false
+local function callGemini(userMsg)
+    if aiSending or aiApiKey == "" then if aiApiKey == "" then toast("Enter API key first!", C.red, 2) end; return end
+    aiSending = true; sendBtn.Text = "..."; sendBtn.Disabled = true
+    addMessage(userMsg, true, false)
+    questInput.Text = ""
+    task.spawn(function()
+        local fullPrompt = "Code:\n\n" .. (fullOutputText or "") .. "\n\nQuestion: " .. userMsg
+        local payload = {contents = {{parts = {{text = fullPrompt}}}}}
+        local ok, res = pcall(function()
+            return _request({
+                Url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" .. aiApiKey,
+                Method = "POST",
+                Headers = {["content-type"] = "application/json"},
+                Body = HttpService:JSONEncode(payload)
+            })
+        end)
+        local response = "Error connecting"
+        if ok and res and res.StatusCode == 200 then
+            local dec = pcall(function() return HttpService:JSONDecode(res.Body) end)
+            if dec then
+                local decoded = HttpService:JSONDecode(res.Body)
+                if decoded.candidates and decoded.candidates[1] and decoded.candidates[1].content and decoded.candidates[1].content.parts and decoded.candidates[1].content.parts[1] then
+                    response = decoded.candidates[1].content.parts[1].text or "No response"
+                end
+            end
+        else
+            response = "Error: " .. (res and tostring(res.StatusCode) or "No connection")
+        end
+        if response:find("```") then
+            local codeMatch = response:match("```[^```]*?([^```]+)```")
+            if codeMatch then
+                addMessage("Code:", false, false)
+                addMessage(codeMatch, false, true)
+                local remaining = response:gsub("```[^```]*?```", ""):gsub("^%s+", ""):gsub("%s+$", "")
+                if remaining ~= "" then addMessage(remaining, false, false) end
+            else
+                addMessage(response, false, false)
+            end
+        else
+            addMessage(response, false, false)
+        end
+        aiSending = false; sendBtn.Text = "→"; sendBtn.Disabled = false
+    end)
+end
+
+sendBtn.MouseButton1Click:Connect(function()
+    local msg = questInput.Text:gsub("^%s+", ""):gsub("%s+$", "")
+    if msg ~= "" then callGemini(msg) end
+end)
+
+askAiBtn.MouseButton1Click:Connect(function()
+    if fullOutputText == "" then
+        toast("Decompile a script first!", C.yel)
+        return
+    end
+    aiWindow.BackgroundTransparency = 1
+    aiWindow.Visible = true
+    tw(aiWindow, {BackgroundTransparency = 0}, 0.25)
+    questInput:CaptureFocus()
+    if #chatMessages == 0 then
+        addMessage("Decompiled code loaded. Ask me anything!", false, false)
+    end
+end)
+
 -- Decompile logic
 local busy = false
 decompBtn.MouseButton1Click:Connect(function()
@@ -800,7 +977,7 @@ copyBtn.MouseButton1Click:Connect(function()
     if fullOutputText == "" then return end
     pcall(function() if setclipboard then setclipboard(fullOutputText); toast("Copied " .. #fullOutputText .. " chars", C.grn) end end)
 end)
-clearBtn.MouseButton1Click:Connect(function() setOutput(""); dStatus.Text = "Ready"; dStatus.TextColor3 = C.t3; if selMode then toggleSel() end end)
+clearBtn.MouseButton1Click:Connect(function() setOutput(""); inputBox.Text = ""; dStatus.Text = "Ready"; dStatus.TextColor3 = C.t3; if selMode then toggleSel() end end)
 saveBtn.MouseButton1Click:Connect(function()
     if fullOutputText == "" then return end
     pcall(function() if writefile then local fn = "NovaDec_" .. os.time() .. ".lua"; writefile(fn, fullOutputText); toast("Saved: " .. fn, C.grn) end end)
